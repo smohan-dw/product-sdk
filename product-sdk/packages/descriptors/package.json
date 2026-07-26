@@ -6,6 +6,18 @@
     "type": "module",
     "sideEffects": false,
     "exports": {
+        "./commons-asset-hub": {
+            "types": "./chains/commons-asset-hub/generated/dist/index.d.ts",
+            "import": "./chains/commons-asset-hub/generated/dist/index.js"
+        },
+        "./commons-bulletin": {
+            "types": "./chains/commons-bulletin/generated/dist/index.d.ts",
+            "import": "./chains/commons-bulletin/generated/dist/index.js"
+        },
+        "./commons-individuality": {
+            "types": "./chains/commons-individuality/generated/dist/index.d.ts",
+            "import": "./chains/commons-individuality/generated/dist/index.js"
+        },
         "./devnet-asset-hub": {
             "types": "./chains/devnet-asset-hub/generated/dist/index.d.ts",
             "import": "./chains/devnet-asset-hub/generated/dist/index.js"

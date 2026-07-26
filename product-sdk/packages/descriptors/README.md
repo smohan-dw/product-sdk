@@ -14,6 +14,9 @@ PAPI-generated chain descriptors for the Polkadot ecosystem. These provide fully
 | Devnet Asset Hub | `@parity/product-sdk-descriptors/devnet-asset-hub` | Paseo testnet (products devnet) |
 | Devnet Bulletin | `@parity/product-sdk-descriptors/devnet-bulletin` | Paseo testnet (products devnet) |
 | Devnet Individuality | `@parity/product-sdk-descriptors/devnet-individuality` | Paseo testnet (products devnet) |
+| Commons Asset Hub | `@parity/product-sdk-descriptors/commons-asset-hub` | cord-commons (single dev chain, multi-role) |
+| Commons Bulletin | `@parity/product-sdk-descriptors/commons-bulletin` | cord-commons (single dev chain, multi-role) |
+| Commons Individuality | `@parity/product-sdk-descriptors/commons-individuality` | cord-commons (single dev chain, multi-role) |
 
 ## Which network does each descriptor target?
 
@@ -24,6 +27,11 @@ PAPI-generated chain descriptors for the Polkadot ecosystem. These provide fully
 - **`devnet-*` targets the public Paseo testnet** system chains (Asset Hub 1000,
   People 1004, Bulletin 1010) — the community-run "products devnet" operated by the
   Polkadot Community Foundation.
+- **`commons-*` all point at the same cord-commons chain** (`ws://127.0.0.1:9944`
+  during descriptor generation) — cord-commons is a single Aura solo chain that
+  serves the assetHub/bulletin/individuality roles off one genesis, so all three
+  descriptors share an identical `genesis`/`codeHash`. They exist as separate
+  entries only so `createChainClient()` can address each role by name.
 
 The `wsUrl` in each chain's `.papi/polkadot-api.json` is used **only at descriptor
 generation time** (fetching metadata, pinning `genesis`/`codeHash`). At runtime the

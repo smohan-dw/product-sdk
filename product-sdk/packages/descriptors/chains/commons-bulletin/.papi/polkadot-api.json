@@ -1,0 +1,12 @@
+{
+    "version": 0,
+    "descriptorPath": "generated",
+    "entries": {
+        "commons_bulletin": {
+            "wsUrl": "ws://127.0.0.1:9944",
+            "metadata": "../../.papi/metadata/commons_bulletin.scale",
+            "genesis": "0x8702ce3256986eb4af719cf7ea0367ea2e0e950eebd839d94d744a12d0e488a0",
+            "codeHash": "0x5125d89afd3f0b8d425ac9f783ef66f85063441aa746ab86f8940bb8671cfba2"
+        }
+    }
+}
