@@ -251,7 +251,10 @@ export function createContractRuntimeFromClient<TDescriptor>(
  * @param runtime - The contract runtime (typically `createContractRuntime(...)`).
  * @param address - The SS58 address of the account to map.
  * @param signer - A signer matching `address`.
- * @param options - Optional timeout / status callback (forwarded to the underlying tx).
+ * @param options - Optional timeout / status callback (forwarded to the underlying tx), plus
+ *   `customSignedExtensions` for chains whose `map_account` extrinsic needs an explicit signed
+ *   extension PAPI's dynamic signer can't default-encode (e.g. cord-commons's
+ *   `VerifyMultiSignature` — see `@parity/product-sdk-tx`'s `SubmitOptions.customSignedExtensions`).
  * @returns A `Result`: `ok(TxResult)` from the mapping extrinsic, `ok(null)` if already mapped,
  *   or `err(TxError)` on failure. Delegates to `@parity/product-sdk-tx`'s `ensureAccountMapped`.
  *
@@ -268,7 +271,11 @@ export async function ensureContractAccountMapped(
     runtime: ContractRuntime,
     address: SS58String,
     signer: PolkadotSigner,
-    options?: { timeoutMs?: number; onStatus?: (s: string) => void },
+    options?: {
+        timeoutMs?: number;
+        onStatus?: (s: string) => void;
+        customSignedExtensions?: Record<string, unknown>;
+    },
 ): Promise<Result<TxResult | null, TxError>> {
     const checker = {
         addressIsMapped: async (addr: string): Promise<boolean> => {
