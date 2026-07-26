@@ -30,20 +30,61 @@
  * path (`manager.connect()` + `selectAccount` + `manager.getSigner()`)
  * works too — both go through the host's create-transaction path and
  * preserve unknown signed extensions.
+ *
+ * ── commons mode (readiness-harness Task 5.3, additive) ────────────────
+ * The default behaviour above is unchanged. `e2e/fixtures.commons.ts` uses
+ * Playwright's `page.addInitScript()` to set `window.__COMMONS_GENESIS_HASH__`
+ * before the product iframe ever navigates — that (rather than a URL query
+ * param) is what switches the chain client to cord-commons instead of Paseo
+ * Asset Hub. (A `?network=`/`?genesis=` query-string approach was tried
+ * first and doesn't work: the installed `@parity/host-api-test-sdk@0.11.0`
+ * computes the iframe's FIRST `src` as
+ * `new URL(hostPage.location.pathname+search+hash, productUrl).href`, and
+ * since the host page itself always loads at a bare origin, that resolves
+ * to just `productUrl`'s origin — silently dropping any query string,
+ * confirmed by reading its `dist/host-bundle.js`. `addInitScript` sidesteps
+ * this entirely — it doesn't care what URL the frame ends up at.) The
+ * `@t3rminal/bulletin-index` contract this demo's query()/tx() buttons call
+ * is only deployed on Paseo (its bytecode isn't available to redeploy on
+ * commons — `src/cdm.json` carries only its ABI + address, not bytecode), so
+ * commons mode only exercises boot + `ensureContractAccountMapped` (a real
+ * signed `Revive.map_account` extrinsic against commons, requiring
+ * `customSignedExtensions.VerifyMultiSignature` — see
+ * `docs/integration/test-host-chainconfig.md` in the main cord-commons repo).
+ * The query/tx buttons remain wired to the Paseo contract regardless of
+ * network; commons e2e specs simply don't click them.
  */
 
 import type { SignerAccount } from "@parity/product-sdk-signer";
 import { SignerManager } from "@parity/product-sdk-signer";
-import { getChainAPI } from "@parity/product-sdk-chain-client";
+import { getChainAPI, createChainClient } from "@parity/product-sdk-chain-client";
 import {
     ContractManager,
     ensureContractAccountMapped,
     type CdmJson,
 } from "@parity/product-sdk-contracts";
 import { paseo_asset_hub } from "@parity/product-sdk-descriptors/paseo-asset-hub";
+import { commons_asset_hub } from "@parity/product-sdk-descriptors/commons-asset-hub";
 
 import cdm from "./cdm.json";
 import { appendLog, getEl } from "./ui.js";
+
+// ── Network selection (commons mode is additive — see module doc above) ─
+const COMMONS_GENESIS_HASH =
+    (window as unknown as Record<string, unknown>).__COMMONS_GENESIS_HASH__ as string | undefined;
+const NETWORK: "paseo" | "commons" = COMMONS_GENESIS_HASH ? "commons" : "paseo";
+
+// `commons_asset_hub`'s checked-in descriptor pins whatever genesis hash was live the last time
+// someone ran `papi generate` against a commons `--dev --tmp` node — commons regenerates genesis
+// on every fresh start (docs/integration/test-host-chainconfig.md in cord-commons), so that pin
+// is almost always stale by the time this runs. Clone the descriptor with `.genesis` overridden
+// to the live value the fixture fetched via `chainSpec_v1_genesisHash` and passed through the
+// `?genesis=` param — the compiled metadata/pallet layout is unaffected (same release binary
+// backs every commons run), only the genesis-hash-keyed host routing needs to match.
+const liveCommonsAssetHub =
+    NETWORK === "commons" && COMMONS_GENESIS_HASH
+        ? { ...commons_asset_hub, genesis: COMMONS_GENESIS_HASH }
+        : null;
 
 // ── DOM ───────────────────────────────────────────────────────────────
 const $connectionStatus = getEl<HTMLSpanElement>("connection-status");
@@ -79,7 +120,7 @@ function log(msg: string, level: Parameters<typeof appendLog>[2] = "info"): void
 }
 
 // ── App state ────────────────────────────────────────────────────────
-const SS58_PREFIX = 0; // Paseo Asset Hub
+const SS58_PREFIX = NETWORK === "commons" ? 29 : 0; // cord-commons vs Paseo Asset Hub
 
 const manager = new SignerManager({ ss58Prefix: SS58_PREFIX, dappName: "contracts-demo" });
 
@@ -89,7 +130,9 @@ const manager = new SignerManager({ ss58Prefix: SS58_PREFIX, dappName: "contract
 // signed extensions (e.g. AsPgas on Paseo Next) round-trip end-to-end.
 let productAccount: SignerAccount | null = null;
 
-type ChainClient = Awaited<ReturnType<typeof getChainAPI<"paseo">>>;
+type ChainClient =
+    | Awaited<ReturnType<typeof getChainAPI<"paseo">>>
+    | Awaited<ReturnType<typeof createChainClient<{ assetHub: typeof commons_asset_hub }>>>;
 let chain: ChainClient | null = null;
 let contractManager: ContractManager | null = null;
 
@@ -257,9 +300,16 @@ async function init() {
     productAccount = productRes.value;
     log(`Product account ready: ${productAccount.address}`, "ok");
 
-    log("Opening chain client…");
+    log(`Opening chain client (network=${NETWORK})…`);
     try {
-        chain = await getChainAPI("paseo");
+        if (NETWORK === "commons") {
+            if (!liveCommonsAssetHub) {
+                throw new Error("network=commons but no ?genesis= param supplied");
+            }
+            chain = await createChainClient({ chains: { assetHub: liveCommonsAssetHub } });
+        } else {
+            chain = await getChainAPI("paseo");
+        }
         log("Chain client ready", "ok");
     } catch (err) {
         log(`Chain client failed: ${(err as Error).message}`, "err");
@@ -272,11 +322,14 @@ async function init() {
         // `ReviveApi.call` dry-run through PAPI's unsafe API, sidestepping
         // compatibility-token failures when the descriptor lags a chain
         // upgrade. Pass the raw client + descriptor so it can wire up both
-        // typed (extrinsics + storage) and unsafe (dry-run) paths.
+        // typed (extrinsics + storage) and unsafe (dry-run) paths. This is
+        // lazy — it does not touch the network, so it succeeds on commons
+        // even though the `@t3rminal/bulletin-index` contract itself isn't
+        // deployed there (see the module doc).
         contractManager = ContractManager.fromClient(
             cdm as CdmJson,
             chain.raw.assetHub,
-            paseo_asset_hub,
+            NETWORK === "commons" ? (liveCommonsAssetHub as typeof commons_asset_hub) : paseo_asset_hub,
             { signerManager: manager },
         );
         log("ContractManager ready (@t3rminal/bulletin-index)", "ok");
@@ -298,6 +351,14 @@ async function init() {
             contractManager.getRuntime(),
             productAccount.address,
             signer,
+            // commons wires pallet_verify_signature's VerifySignature extension into every
+            // extrinsic (TxExtension) — PAPI's dynamic signer only auto-fills a fixed whitelist
+            // that doesn't include it, so every signed call against commons must supply the
+            // disabled/passthrough value explicitly or PAPI throws "Missing VerifyMultiSignature
+            // signed extension" (docs/integration/test-host-chainconfig.md in cord-commons).
+            NETWORK === "commons"
+                ? { customSignedExtensions: { VerifyMultiSignature: { value: { type: "Disabled" } } } }
+                : undefined,
         );
         if (!mapped.ok) {
             log(`ensureContractAccountMapped failed: ${mapped.error.message}`, "err");
