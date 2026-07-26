@@ -438,12 +438,14 @@ export function wrapContract(
                     );
                     if (!built.ok) return built;
 
-                    return submitAndWatch(built.value, signer, {
-                        waitFor: overrides?.waitFor,
-                        timeoutMs: overrides?.timeoutMs,
-                        mortalityPeriod: overrides?.mortalityPeriod,
-                        onStatus: overrides?.onStatus,
-                    });
+                    // Forward the whole options object (as batch.ts does for
+                    // batchSubmitAndWatch) rather than cherry-picking known
+                    // SubmitOptions keys — TxOptions extends SubmitOptions, and
+                    // submitAndWatch only reads the keys it knows about, so this
+                    // stays correct as SubmitOptions grows (e.g. customSignedExtensions,
+                    // needed for chains like cord-commons whose SignedExtra can't
+                    // default-encode every extension) without another silent drop.
+                    return submitAndWatch(built.value, signer, overrides);
                 },
 
                 prepare: async (
@@ -1177,6 +1179,134 @@ if (import.meta.vitest) {
                 .prepare({ at: "finalized" })
                 .catch(() => {});
             expect(calls[0]?.[6]).toEqual({ at: "finalized" });
+        });
+    });
+
+    describe("wrapContract — SubmitOptions forwarding", () => {
+        // Regression test: .tx() used to cherry-pick { waitFor, timeoutMs,
+        // mortalityPeriod, onStatus } out of the overrides object, silently
+        // dropping any other SubmitOptions field. customSignedExtensions
+        // (needed on chains like cord-commons, whose SignedExtra declares
+        // extensions PAPI can't default-encode, e.g. VerifyMultiSignature)
+        // is the case that surfaced it. .tx() now forwards the whole
+        // overrides object to submitAndWatch, the same way batch.ts does
+        // for batchSubmitAndWatch.
+        const abi: AbiEntry[] = [
+            {
+                type: "function",
+                name: "increment",
+                inputs: [],
+                outputs: [],
+                stateMutability: "nonpayable",
+            },
+        ];
+        const ADDRESS = "0x0102030405060708090a0b0c0d0e0f1011121314";
+        const origin = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY" as SS58String;
+        const fakeSigner = {
+            publicKey: new Uint8Array(32),
+        } as unknown as PolkadotSigner;
+
+        function makeSubmitCapturingRuntime(): {
+            runtime: ContractRuntime;
+            getCapturedOptions: () => unknown;
+        } {
+            let capturedOptions: unknown;
+            const runtime: ContractRuntime = {
+                api: {
+                    tx: {
+                        Revive: {
+                            call: () =>
+                                ({
+                                    signSubmitAndWatch: (_signer: unknown, options: unknown) => {
+                                        capturedOptions = options;
+                                        return {
+                                            subscribe: (handlers: {
+                                                next: (event: unknown) => void;
+                                            }) => {
+                                                queueMicrotask(() => {
+                                                    handlers.next({
+                                                        type: "txBestBlocksState",
+                                                        txHash: "0xdeadbeef",
+                                                        found: true,
+                                                        ok: true,
+                                                        events: [],
+                                                        block: {
+                                                            hash: "0xblock",
+                                                            number: 1,
+                                                            index: 0,
+                                                        },
+                                                    });
+                                                });
+                                                return { unsubscribe: () => {} };
+                                            },
+                                        };
+                                    },
+                                }) as unknown as Awaited<
+                                    ReturnType<ContractRuntime["api"]["tx"]["Revive"]["call"]>
+                                >,
+                        },
+                    },
+                } as unknown as ContractRuntime["api"],
+                dryRunCall: () =>
+                    Promise.resolve({
+                        weight_consumed: { ref_time: 0n, proof_size: 0n },
+                        weight_required: { ref_time: 1n, proof_size: 1n },
+                        storage_deposit: { type: "Refund", value: 0n },
+                        max_storage_deposit: { type: "Refund", value: 0n },
+                        gas_consumed: 0n,
+                        result: { success: true, value: { flags: 0, data: new Uint8Array(0) } },
+                    }),
+            };
+            return { runtime, getCapturedOptions: () => capturedOptions };
+        }
+
+        test(".tx() forwards customSignedExtensions to submitAndWatch", async () => {
+            const { runtime, getCapturedOptions } = makeSubmitCapturingRuntime();
+            const wrapped = wrapContract(runtime, ADDRESS, abi, { origin, signer: fakeSigner });
+            const customSignedExtensions = {
+                VerifyMultiSignature: { value: { type: "Disabled" } },
+            };
+
+            const result = await (
+                wrapped as unknown as {
+                    increment: {
+                        tx: (opts: {
+                            customSignedExtensions: Record<string, unknown>;
+                        }) => Promise<{ ok: boolean }>;
+                    };
+                }
+            ).increment.tx({ customSignedExtensions });
+
+            expect(result.ok).toBe(true);
+            expect(getCapturedOptions()).toMatchObject({ customSignedExtensions });
+        });
+
+        test(".tx() still forwards timeoutMs/mortalityPeriod/onStatus (unchanged behavior)", async () => {
+            // waitFor stays "best-block" (the default) here — the mock runtime
+            // only ever emits a txBestBlocksState event, never "finalized".
+            const { runtime, getCapturedOptions } = makeSubmitCapturingRuntime();
+            const wrapped = wrapContract(runtime, ADDRESS, abi, { origin, signer: fakeSigner });
+            const onStatus = () => {};
+
+            await (
+                wrapped as unknown as {
+                    increment: {
+                        tx: (opts: {
+                            timeoutMs: number;
+                            mortalityPeriod: number;
+                            onStatus: () => void;
+                        }) => Promise<unknown>;
+                    };
+                }
+            ).increment.tx({
+                timeoutMs: 12_345,
+                mortalityPeriod: 64,
+                onStatus,
+            });
+
+            expect(getCapturedOptions()).toMatchObject({
+                mortality: { mortal: true, period: 64 },
+            });
         });
     });
 
