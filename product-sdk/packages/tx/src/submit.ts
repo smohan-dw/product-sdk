@@ -24,15 +24,16 @@ const log = createLogger("tx");
 /**
  * Read `PSDK_MORTALITY_PERIOD` from the environment, guarded so it's a no-op
  * in a browser (no `process`) or a host container that doesn't expose `env`.
- * Returns `undefined` when unset or not a finite number, so the caller can
- * fall through to {@link DEFAULT_MORTALITY_PERIOD}.
+ * Returns `undefined` when unset, not a finite number, or not a positive
+ * number (a mortality period of 0 or less is meaningless), so the caller
+ * can fall through to {@link DEFAULT_MORTALITY_PERIOD}.
  */
 function resolveMortalityPeriodFromEnv(): number | undefined {
     if (typeof process === "undefined" || !process.env) return undefined;
     const raw = process.env.PSDK_MORTALITY_PERIOD;
     if (!raw) return undefined;
     const parsed = Number(raw);
-    return Number.isFinite(parsed) ? parsed : undefined;
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 /**
@@ -585,6 +586,36 @@ if (import.meta.vitest) {
                 process.env.PSDK_MORTALITY_PERIOD = original ?? "";
             }
         });
+
+        test.each(["0", "-5", "-1"])(
+            "rejects a non-positive PSDK_MORTALITY_PERIOD (%s) and falls back to the 256 default",
+            async (value) => {
+                let capturedOptions: unknown;
+                const tx: SubmittableTransaction = {
+                    signSubmitAndWatch: (_signer: PolkadotSigner, options?: unknown) => {
+                        capturedOptions = options;
+                        return {
+                            subscribe: (handlers: MockSubscribeHandlers) => {
+                                queueMicrotask(() => {
+                                    handlers.next(signedEvent);
+                                    handlers.next(bestBlockOk);
+                                });
+                                return { unsubscribe: vi.fn() };
+                            },
+                        };
+                    },
+                };
+
+                const original = process.env.PSDK_MORTALITY_PERIOD;
+                process.env.PSDK_MORTALITY_PERIOD = value;
+                try {
+                    await submitAndWatch(tx, mockSigner);
+                    expect(capturedOptions).toEqual({ mortality: { mortal: true, period: 256 } });
+                } finally {
+                    process.env.PSDK_MORTALITY_PERIOD = original ?? "";
+                }
+            },
+        );
 
         test("wraps signing rejection in TxSigningRejectedError", async () => {
             const tx = createMockTx((h) => {
