@@ -32,6 +32,19 @@ export interface SubmitOptions {
     mortalityPeriod?: number;
     /** Called on each lifecycle transition for UI progress indicators. */
     onStatus?: (status: TxStatus) => void;
+    /**
+     * Explicit values for chain-specific signed extensions that PAPI can't
+     * default-encode from `undefined` — e.g. cord-commons declares
+     * `VerifyMultiSignature` (an enum with no encodable empty/unit variant),
+     * so signing against it throws `Missing VerifyMultiSignature signed
+     * extension` unless a value is supplied here. Applies identically
+     * whether the transaction came from the typed or dynamic PAPI API —
+     * both resolve signed extensions through the same runtime-metadata-driven
+     * path, so the typed API's descriptor types don't auto-fill this for you.
+     * Shape is `{ [identifier]: { value, additionalSigned } }`, passed
+     * through verbatim to PAPI's `signSubmitAndWatch`.
+     */
+    customSignedExtensions?: Record<string, unknown>;
 }
 
 /** Options for {@link withRetry}. */
@@ -68,7 +81,10 @@ export type DevAccountName = "Alice" | "Bob" | "Charlie" | "Dave" | "Eve" | "Fer
 export interface SubmittableTransaction {
     signSubmitAndWatch: (
         signer: PolkadotSigner,
-        options?: { mortality?: { mortal: boolean; period: number } },
+        options?: {
+            mortality?: { mortal: boolean; period: number };
+            customSignedExtensions?: Record<string, unknown>;
+        },
     ) => {
         subscribe: (handlers: {
             next: (event: TxEvent) => void;

@@ -112,6 +112,7 @@ export async function submitAndWatch(
     const mortalityPeriod =
         options?.mortalityPeriod ?? resolveMortalityPeriodFromEnv() ?? DEFAULT_MORTALITY_PERIOD;
     const onStatus = options?.onStatus;
+    const customSignedExtensions = options?.customSignedExtensions;
 
     const resolvedTx = await resolveTransaction(tx);
 
@@ -145,6 +146,7 @@ export async function submitAndWatch(
         try {
             const observable = resolvedTx.signSubmitAndWatch(signer, {
                 mortality: { mortal: true, period: mortalityPeriod },
+                customSignedExtensions,
             });
 
             subscription = observable.subscribe({
@@ -499,6 +501,33 @@ if (import.meta.vitest) {
             };
             await submitAndWatch(tx, mockSigner, { mortalityPeriod: 512 });
             expect(capturedOptions).toEqual({ mortality: { mortal: true, period: 512 } });
+        });
+
+        test("passes customSignedExtensions through to signSubmitAndWatch", async () => {
+            // cord-commons declares VerifyMultiSignature (an enum with no
+            // encodable empty/unit variant) in its SignedExtra, so signing
+            // throws "Missing VerifyMultiSignature signed extension" unless
+            // a value is supplied — this is how a caller supplies it.
+            let capturedOptions: unknown;
+            const tx: SubmittableTransaction = {
+                signSubmitAndWatch: (_signer: PolkadotSigner, options?: unknown) => {
+                    capturedOptions = options;
+                    return {
+                        subscribe: (handlers: MockSubscribeHandlers) => {
+                            queueMicrotask(() => {
+                                handlers.next(signedEvent);
+                                handlers.next(bestBlockOk);
+                            });
+                            return { unsubscribe: vi.fn() };
+                        },
+                    };
+                },
+            };
+            const customSignedExtensions = {
+                VerifyMultiSignature: { value: { type: "Disabled" } },
+            };
+            await submitAndWatch(tx, mockSigner, { customSignedExtensions });
+            expect(capturedOptions).toMatchObject({ customSignedExtensions });
         });
 
         test("PSDK_MORTALITY_PERIOD env override wins over the 256 default", async () => {
