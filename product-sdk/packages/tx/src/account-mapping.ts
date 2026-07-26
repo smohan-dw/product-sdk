@@ -6,7 +6,7 @@ import type { PolkadotSigner } from "polkadot-api";
 
 import { TxError } from "./errors.js";
 import { submitAndWatch } from "./submit.js";
-import type { SubmittableTransaction, TxResult } from "./types.js";
+import type { SubmittableTransaction, SubmitOptions, TxResult } from "./types.js";
 
 const log = createLogger("tx:mapping");
 
@@ -53,6 +53,12 @@ export interface EnsureAccountMappedOptions {
     timeoutMs?: number;
     /** Called on mapping transaction status changes. */
     onStatus?: (status: "checking" | "mapping" | "mapped" | "already-mapped") => void;
+    /**
+     * Explicit values for chain-specific signed extensions the `map_account`
+     * transaction can't default-encode — see {@link SubmitOptions.customSignedExtensions}.
+     * Forwarded verbatim to the underlying `submitAndWatch` call.
+     */
+    customSignedExtensions?: Record<string, unknown>;
 }
 
 /**
@@ -126,6 +132,7 @@ export async function ensureAccountMapped(
     const result = await submitAndWatch(tx, signer, {
         waitFor: "best-block",
         timeoutMs,
+        customSignedExtensions: options?.customSignedExtensions,
     });
     if (!result.ok) return result;
 
@@ -292,6 +299,48 @@ if (import.meta.vitest) {
             const result = await ensureAccountMapped("5Alice", mockSigner, checker, api);
             expect(result.ok).toBe(false);
             if (!result.ok) expect(result.error).toBeInstanceOf(TxDispatchError);
+        });
+
+        test("forwards customSignedExtensions to submitAndWatch (e.g. cord-commons VerifyMultiSignature)", async () => {
+            const checker: MappingChecker = {
+                addressIsMapped: vi.fn().mockResolvedValue(false),
+            };
+
+            let capturedOptions: unknown;
+            const mockTx: SubmittableTransaction = {
+                signSubmitAndWatch: (_signer, options) => {
+                    capturedOptions = options;
+                    return {
+                        subscribe: (handlers) => {
+                            queueMicrotask(() => {
+                                handlers.next({ type: "signed", txHash: "0xabc" });
+                                handlers.next({
+                                    type: "txBestBlocksState",
+                                    txHash: "0xabc",
+                                    found: true,
+                                    ok: true,
+                                    events: [],
+                                    block: { hash: "0xblock", number: 1, index: 0 },
+                                });
+                            });
+                            return { unsubscribe: () => {} };
+                        },
+                    };
+                },
+            };
+
+            const api: ReviveApi = {
+                tx: { Revive: { map_account: () => mockTx } },
+            };
+
+            const customSignedExtensions = {
+                VerifyMultiSignature: { value: { type: "Disabled" } },
+            };
+            const result = await ensureAccountMapped("5Alice", mockSigner, checker, api, {
+                customSignedExtensions,
+            });
+            expect(result.ok).toBe(true);
+            expect(capturedOptions).toMatchObject({ customSignedExtensions });
         });
 
         test("propagates TxTimeoutError from submitAndWatch", async () => {
