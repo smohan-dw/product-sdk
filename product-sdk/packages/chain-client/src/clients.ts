@@ -28,9 +28,14 @@ function unsupportedChainApi(error: ChainNotSupportedError): never {
     return new Proxy((() => {}) as () => void, handler) as never;
 }
 
-// Cache keys are scoped by a fingerprint of the config so that two
-// `createChainClient` calls with different chain sets don't collide.
-const cacheKey = (fingerprint: string, genesis: string) => `${fingerprint}:${genesis}`;
+// Cache keys are scoped by role name + a fingerprint of the config, so that
+// (a) two `createChainClient` calls with different chain sets don't collide,
+// and (b) multiple roles that share a genesis (e.g. cord-commons serving
+// assetHub/bulletin/individuality off one chain) each get their own cache
+// entry instead of silently aliasing onto a single client — otherwise only
+// one of the N underlying clients is ever destroyed, leaking the rest.
+const cacheKey = (name: string, fingerprint: string, genesis: string) =>
+    `${name}:${fingerprint}:${genesis}`;
 
 function findEntryByGenesis(genesis: string): ChainEntry | undefined {
     for (const [key, entry] of getClientCache()) {
@@ -94,7 +99,10 @@ export async function createChainClient<const TChains extends Record<string, Cha
         // WebSocket connections that are unreachable except via destroyAll().
         const cache = getClientCache();
         for (const [key, entry] of cache) {
-            if (key.startsWith(`${fingerprint}:`)) {
+            // Key shape is `${name}:${fingerprint}:${genesis}`; `fingerprint`
+            // itself can contain colons (it's `name:genesis` pairs joined by
+            // `|`), so match it as a literal middle segment rather than a prefix.
+            if (key.includes(`:${fingerprint}:`)) {
                 try {
                     entry.client.destroy();
                 } catch {
@@ -131,7 +139,7 @@ async function initChainClient<const TChains extends Record<string, ChainDefinit
                 const client = createClient(provider);
 
                 // Populate HMR cache so getClient() and isConnected() work
-                const key = cacheKey(fingerprint, genesis);
+                const key = cacheKey(name, fingerprint, genesis);
                 if (!clientCache.has(key)) {
                     clientCache.set(key, {
                         client,
@@ -177,8 +185,8 @@ async function initChainClient<const TChains extends Record<string, ChainDefinit
         ...apis,
         raw,
         destroy() {
-            for (const { genesis } of entries) {
-                const key = cacheKey(fingerprint, genesis);
+            for (const { name, genesis } of entries) {
+                const key = cacheKey(name, fingerprint, genesis);
                 const entry = clientCache.get(key);
                 if (entry) {
                     try {
@@ -252,8 +260,8 @@ if (import.meta.vitest) {
         getTypedApi: () => ({}),
     } as unknown as PolkadotClient;
 
-    function seedCache(genesis: string, client: PolkadotClient, fp = "test") {
-        getClientCache().set(cacheKey(fp, genesis), {
+    function seedCache(genesis: string, client: PolkadotClient, fp = "test", name = "role") {
+        getClientCache().set(cacheKey(name, fp, genesis), {
             client,
             api: new Map(),
         });
@@ -373,6 +381,52 @@ if (import.meta.vitest) {
         expect(a).not.toBe(b);
     });
 
+    test("three roles sharing one genesis (e.g. cord-commons assetHub/bulletin/individuality) each get their own client, and destroy() tears down all three", async () => {
+        // Regression test: the cache key used to be `${fingerprint}:${genesis}`,
+        // so three roles resolving to the same genesis within one
+        // createChainClient() call collided on a single cache entry — only one
+        // of the three underlying clients was ever destroy()'d, leaking the
+        // other two WebSocket connections. The key now includes the role name.
+        const { createProvider } = await import("./providers.js");
+        const { createClient } = await import("polkadot-api");
+
+        let nextClientId = 0;
+        const destroyedIds: number[] = [];
+        vi.mocked(createProvider).mockImplementation(async () => (() => {}) as never);
+        vi.mocked(createClient).mockImplementation(() => {
+            const id = nextClientId++;
+            return {
+                getTypedApi: () => ({ id }),
+                destroy: () => destroyedIds.push(id),
+            } as unknown as PolkadotClient;
+        });
+
+        const sharedGenesis = "0xcommons-shared-genesis";
+        const descriptor = { genesis: sharedGenesis } as ChainDefinition;
+        const chains = { assetHub: descriptor, bulletin: descriptor, individuality: descriptor };
+        const fp = configFingerprint(chains);
+
+        const client = (await createChainClient({ chains })) as any;
+
+        // Three distinct clients were created (one per role), not deduplicated.
+        expect(nextClientId).toBe(3);
+
+        // Each role has its own cache entry.
+        const cache = getClientCache();
+        expect(cache.has(cacheKey("assetHub", fp, sharedGenesis))).toBe(true);
+        expect(cache.has(cacheKey("bulletin", fp, sharedGenesis))).toBe(true);
+        expect(cache.has(cacheKey("individuality", fp, sharedGenesis))).toBe(true);
+
+        client.destroy();
+
+        // All three underlying clients were destroyed — not just the one that
+        // happened to win the old collided cache slot.
+        expect(destroyedIds.sort()).toEqual([0, 1, 2]);
+        expect(cache.has(cacheKey("assetHub", fp, sharedGenesis))).toBe(false);
+        expect(cache.has(cacheKey("bulletin", fp, sharedGenesis))).toBe(false);
+        expect(cache.has(cacheKey("individuality", fp, sharedGenesis))).toBe(false);
+    });
+
     // --- configFingerprint ---
 
     test("configFingerprint is stable regardless of key order", () => {
@@ -411,7 +465,7 @@ if (import.meta.vitest) {
 
         // Destroy only fpA's entry
         const cache = getClientCache();
-        const keyA = cacheKey("fpA", sharedGenesis);
+        const keyA = cacheKey("role", "fpA", sharedGenesis);
         cache.get(keyA)?.client.destroy();
         cache.delete(keyA);
 
